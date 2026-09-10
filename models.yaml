@@ -1,0 +1,17 @@
+# List of models to probe on DigitalOcean Serverless Inference.
+# Use the exact model IDs shown in the DO control panel / the
+# `GET /v1/models` endpoint. The ones below are placeholders —
+# replace them with the models you actually want to check.
+models:
+  - glm-5.3-flash
+  - glm-5.2
+  - kimi-k2.6
+  - deepseek-v4-flash-0731
+
+# Optional: override the garbled-text detection thresholds.
+# Any omitted key falls back to the defaults in rubric/heuristics.py.
+thresholds:
+  max_non_ascii_ratio: 0.15   # fraction of non-ASCII letters allowed
+  max_symbol_ratio: 0.30      # fraction of noise/symbol chars allowed
+  max_repetition_ratio: 0.50  # most-frequent-token share allowed
+  min_wordlike_ratio: 0.60    # fraction of tokens that must look like words
