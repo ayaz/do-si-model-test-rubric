@@ -72,13 +72,29 @@ class PromptOutcome:
 
 
 @dataclass
+class CapabilityOutcome:
+    """Result of a capability probe (tool calling / structured output)."""
+
+    name: str            # short id, e.g. "tool-calling"
+    label: str           # human label shown in the report
+    description: str     # what the probe asked the model to do
+    status: str
+    detail: str | None = None      # judge explanation
+    body: str | None = None        # raw response / tool call to show in <pre>
+    finish_reason: str | None = None
+    temperature: float | None = None
+    is_error: bool = False
+
+
+@dataclass
 class ModelOutcome:
     model: str
     prompts: list[PromptOutcome] = field(default_factory=list)
+    capabilities: list[CapabilityOutcome] = field(default_factory=list)
 
     @property
     def status(self) -> str:
-        present = {p.status for p in self.prompts}
+        present = {p.status for p in self.prompts} | {c.status for c in self.capabilities}
         for s in _PRECEDENCE:
             if s in present:
                 return s
@@ -104,6 +120,8 @@ h1 { margin: 0 0 .25rem; font-size: 1.6rem; }
 .badge { font-size: .8rem; font-weight: 700; padding: .15rem .55rem; border-radius: 999px; border: 1px solid var(--border); }
 .badge.pass { color: var(--pass); } .badge.fail { color: var(--fail); }
 .badge.warn { color: var(--warn); } .badge.error { color: var(--error); }
+.section { border-top: 1px solid var(--border); padding: .6rem 1.1rem; background: #fbfcfd;
+           font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: #57606a; }
 .prompt { border-top: 1px solid var(--border); padding: .9rem 1.1rem; }
 .prompt .q { font-weight: 600; margin: 0 0 .4rem; display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
 .prompt .tag { font-size: .8rem; color: #57606a; font-weight: 400; }
@@ -161,15 +179,47 @@ def _prompt_block(p: PromptOutcome) -> str:
     return "".join(parts)
 
 
+def _capability_block(c: CapabilityOutcome) -> str:
+    _, cls = _STATUS_META[c.status]
+    parts = ['<div class="prompt">']
+    parts.append(
+        f'<p class="q"><span class="chip {cls}">{c.status}</span>'
+        f'{escape(c.label)} <span class="tag">— {escape(c.description)}</span></p>'
+    )
+    if c.is_error:
+        parts.append(f'<p class="errmsg">{escape(c.detail or "")}</p>')
+    else:
+        if c.body:
+            parts.append(f"<pre>{escape(c.body)}</pre>")
+        if c.detail:
+            note_cls = "note" if c.status in (WARN, PASS) else "flags"
+            if note_cls == "flags":
+                parts.append(f'<ul class="flags"><li>{escape(c.detail)}</li></ul>')
+            else:
+                parts.append(f'<p class="note">{escape(c.detail)}</p>')
+        if c.finish_reason is not None or c.temperature is not None:
+            parts.append(
+                f'<p class="finish">finish_reason: {escape(str(c.finish_reason))}'
+                f' · temperature: {escape(_fmt_temp(c.temperature))}</p>'
+            )
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _model_block(m: ModelOutcome) -> str:
     icon, cls = _STATUS_META[m.status]
     prompts_html = "".join(_prompt_block(p) for p in m.prompts)
+    caps_html = ""
+    if m.capabilities:
+        caps_html = '<div class="section">Capability checks</div>' + "".join(
+            _capability_block(c) for c in m.capabilities
+        )
     open_attr = "" if m.status == PASS else " open"
     return (
         f'<details class="model"{open_attr}>'
         f'<summary>{icon} {escape(m.model)} '
         f'<span class="badge {cls}">{m.status}</span></summary>'
-        f"{prompts_html}"
+        f"{prompts_html}{caps_html}"
         f"</details>"
     )
 

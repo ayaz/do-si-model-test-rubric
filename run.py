@@ -12,11 +12,27 @@ import argparse
 import datetime
 import sys
 
-from rubric.client import make_client, run_prompt
+from rubric.capabilities import (
+    evaluate_structured_output,
+    evaluate_tool_call,
+    tool_body,
+)
+from rubric.client import (
+    make_client,
+    run_prompt,
+    run_structured_output,
+    run_tool_call,
+)
 from rubric.config import get_api_key, load_config
 from rubric.heuristics import evaluate
 from rubric.prompts import PROMPTS
-from rubric.report import ModelOutcome, PromptOutcome, build_report, classify
+from rubric.report import (
+    CapabilityOutcome,
+    ModelOutcome,
+    PromptOutcome,
+    build_report,
+    classify,
+)
 
 
 def _load_dotenv() -> None:
@@ -34,6 +50,40 @@ def _load_dotenv() -> None:
             continue
         key, _, value = line.partition("=")
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+def _run_capability_checks(client, model) -> list[CapabilityOutcome]:
+    """Probe tool calling and structured output for one model."""
+    tool_res = run_tool_call(client, model)
+    tool_status, tool_detail = evaluate_tool_call(tool_res)
+
+    struct_res = run_structured_output(client, model)
+    struct_status, struct_detail = evaluate_structured_output(struct_res)
+
+    return [
+        CapabilityOutcome(
+            name="tool-calling",
+            label="Tool calling",
+            description="asked to call get_weather(location) for Paris",
+            status=tool_status,
+            detail=tool_detail,
+            body=tool_body(tool_res),
+            finish_reason=tool_res.finish_reason,
+            temperature=tool_res.temperature,
+            is_error=tool_res.is_error and not tool_res.unsupported,
+        ),
+        CapabilityOutcome(
+            name="structured-output",
+            label="Structured output (JSON schema)",
+            description="asked to extract {name, age, city} as strict-schema JSON",
+            status=struct_status,
+            detail=struct_detail,
+            body=None if struct_res.is_error else (struct_res.text or ""),
+            finish_reason=struct_res.finish_reason,
+            temperature=struct_res.temperature,
+            is_error=struct_res.is_error and not struct_res.unsupported,
+        ),
+    ]
 
 
 def main() -> int:
@@ -71,7 +121,10 @@ def main() -> int:
                     note=note,
                 )
             )
-        outcomes.append(ModelOutcome(model=model, prompts=prompt_outcomes))
+        capabilities = _run_capability_checks(client, model)
+        outcomes.append(
+            ModelOutcome(model=model, prompts=prompt_outcomes, capabilities=capabilities)
+        )
 
     timestamp = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
     path = build_report(outcomes, timestamp=timestamp, api_key=api_key, output_path=args.output)

@@ -13,11 +13,19 @@ to plain English prompts. Each run writes a self-contained `report.html`.
 3. Runs deterministic, network-free **heuristics** over each response
    (non-ASCII flood, symbol/mojibake noise, repetition loops,
    consonant-soup gibberish).
-4. Writes `report.html`: per-model status with expandable per-prompt responses,
-   the reason any heuristic flagged them, and each call's `finish_reason` /
-   temperature.
+4. Runs two **capability probes** per model:
+   - **Tool calling** — offers a `get_weather(location, unit)` tool and checks the
+     model emits a correct tool call with valid JSON arguments.
+   - **Structured output** — requests a strict `json_schema` response and checks
+     the reply is valid JSON matching the required `{name, age, city}` shape.
+5. Writes `report.html`: per-model status with expandable per-prompt responses,
+   the reason any heuristic flagged them, a **Capability checks** section, and each
+   call's `finish_reason` / temperature.
 
-Detection is heuristic-only — no second "judge" model, no extra API calls.
+Garble detection is heuristic-only — no second "judge" model. The capability
+probes are extra API calls (one tool-call and one structured-output request per
+model). Models that don't support a feature are reported as **WARN**
+("unsupported"), distinct from a model that supports it but does it wrong (FAIL).
 
 ### Statuses
 
@@ -94,8 +102,9 @@ run.py                 # entry point
 models.yaml            # models to check + optional thresholds
 rubric/config.py       # load config + API key
 rubric/prompts.py      # built-in English prompt set
-rubric/client.py       # OpenAI client for DO + per-prompt call
+rubric/client.py       # OpenAI client for DO + prompt / tool-call / structured-output calls
 rubric/heuristics.py   # garbled-text detection
+rubric/capabilities.py # tool-calling & structured-output evaluators
 rubric/report.py       # report.html generation
-tests/                 # heuristic sanity checks
+tests/                 # heuristic + classifier + capability sanity checks
 ```

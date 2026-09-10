@@ -45,6 +45,63 @@ def make_client(api_key: str) -> OpenAI:
     return OpenAI(base_url=BASE_URL, api_key=api_key, timeout=TIMEOUT_SECONDS)
 
 
+@dataclass
+class CapabilityResult:
+    """Outcome of a tool-calling or structured-output probe.
+
+    ``unsupported`` marks a request the model's endpoint rejected specifically
+    because the feature isn't available (reported as WARN, not a hard ERROR).
+    """
+
+    text: str | None = None
+    tool_calls: list[dict] | None = None
+    error: str | None = None
+    unsupported: bool = False
+    finish_reason: str | None = None
+    temperature: float | None = None
+
+    @property
+    def is_error(self) -> bool:
+        return self.error is not None
+
+
+# Hints used to tell "the model doesn't support this feature" apart from a
+# generic request failure (auth, timeout, unknown model, …).
+_UNSUPPORTED_HINTS = (
+    "not support",
+    "unsupported",
+    "not available",
+    "not enabled",
+    "no support",
+    "does not accept",
+    "is not allowed",
+    "invalid parameter",
+    "invalid_request",
+    "400",
+)
+
+
+def _is_unsupported(exc: Exception, feature_keywords: tuple[str, ...]) -> bool:
+    msg = str(exc).lower()
+    return any(k in msg for k in feature_keywords) and any(h in msg for h in _UNSUPPORTED_HINTS)
+
+
+def _attempt(do_call):
+    """Run ``do_call(temperature)``; if rejected for the temperature value, retry
+    once at the fallback temperature. Returns (completion, temperature, exception)."""
+    temperature = DEFAULT_TEMPERATURE
+    try:
+        return do_call(temperature), temperature, None
+    except Exception as exc:  # noqa: BLE001
+        if "temperature" in str(exc).lower():
+            temperature = FALLBACK_TEMPERATURE
+            try:
+                return do_call(temperature), temperature, None
+            except Exception as retry_exc:  # noqa: BLE001
+                return None, temperature, retry_exc
+        return None, temperature, exc
+
+
 def _create(client: OpenAI, model: str, prompt_text: str, temperature: float):
     return client.chat.completions.create(
         model=model,
@@ -80,18 +137,9 @@ def run_prompt(client: OpenAI, model: str, prompt_text: str) -> PromptResult:
     attempt is rejected specifically because of the temperature value, retry once
     at the fallback temperature rather than reporting a spurious ERROR.
     """
-    temperature = DEFAULT_TEMPERATURE
-    try:
-        completion = _create(client, model, prompt_text, temperature)
-    except Exception as exc:  # noqa: BLE001 — one bad model must not abort the run
-        if "temperature" in str(exc).lower():
-            temperature = FALLBACK_TEMPERATURE
-            try:
-                completion = _create(client, model, prompt_text, temperature)
-            except Exception as retry_exc:  # noqa: BLE001
-                return PromptResult(error=f"{type(retry_exc).__name__}: {retry_exc}")
-        else:
-            return PromptResult(error=f"{type(exc).__name__}: {exc}")
+    completion, temperature, exc = _attempt(lambda t: _create(client, model, prompt_text, t))
+    if exc is not None:
+        return PromptResult(error=f"{type(exc).__name__}: {exc}", temperature=temperature)
 
     if not completion.choices:
         return PromptResult(error="Response contained no choices.", temperature=temperature)
@@ -102,5 +150,119 @@ def run_prompt(client: OpenAI, model: str, prompt_text: str) -> PromptResult:
         text=text or "",
         finish_reason=choice.finish_reason,
         reasoning_used=reasoning_used,
+        temperature=temperature,
+    )
+
+
+# --- Capability probes: tool calling and structured output ------------------
+
+WEATHER_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a given location.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {
+                    "type": "string",
+                    "description": "City and country, e.g. 'Paris, France'.",
+                },
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+            },
+            "required": ["location"],
+        },
+    },
+}
+TOOL_PROMPT = (
+    "What is the current temperature in Paris, France? "
+    "Use the get_weather tool to look it up."
+)
+_TOOL_KEYWORDS = ("tool", "tools", "tool_choice", "function call", "function_call")
+
+PERSON_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "person",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+                "city": {"type": "string"},
+            },
+            "required": ["name", "age", "city"],
+            "additionalProperties": False,
+        },
+    },
+}
+STRUCT_PROMPT = (
+    "Extract the person's details from this sentence and return them as JSON: "
+    "'Ada Lovelace is 36 years old and lives in London.'"
+)
+_STRUCT_KEYWORDS = ("response_format", "json_schema", "json schema", "structured output")
+
+
+def run_tool_call(client: OpenAI, model: str) -> CapabilityResult:
+    """Probe whether the model emits a correct tool call. Never raises."""
+
+    def do(t):
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": TOOL_PROMPT}],
+            tools=[WEATHER_TOOL],
+            tool_choice="auto",
+            temperature=t,
+            max_tokens=MAX_TOKENS,
+        )
+
+    completion, temperature, exc = _attempt(do)
+    if exc is not None:
+        return CapabilityResult(
+            error=f"{type(exc).__name__}: {exc}",
+            unsupported=_is_unsupported(exc, _TOOL_KEYWORDS),
+            temperature=temperature,
+        )
+
+    choice = completion.choices[0]
+    raw_calls = choice.message.tool_calls or []
+    calls = [
+        {"name": c.function.name, "arguments": c.function.arguments}
+        for c in raw_calls
+        if getattr(c, "function", None) is not None
+    ]
+    return CapabilityResult(
+        tool_calls=calls,
+        finish_reason=choice.finish_reason,
+        temperature=temperature,
+    )
+
+
+def run_structured_output(client: OpenAI, model: str) -> CapabilityResult:
+    """Probe whether the model returns JSON conforming to a strict schema. Never raises."""
+
+    def do(t):
+        return client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": STRUCT_PROMPT}],
+            response_format=PERSON_SCHEMA,
+            temperature=t,
+            max_tokens=MAX_TOKENS,
+        )
+
+    completion, temperature, exc = _attempt(do)
+    if exc is not None:
+        return CapabilityResult(
+            error=f"{type(exc).__name__}: {exc}",
+            unsupported=_is_unsupported(exc, _STRUCT_KEYWORDS),
+            temperature=temperature,
+        )
+
+    choice = completion.choices[0]
+    text, _ = _extract_content(choice.message)
+    return CapabilityResult(
+        text=text or "",
+        finish_reason=choice.finish_reason,
         temperature=temperature,
     )

@@ -12,6 +12,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rubric.heuristics import evaluate  # noqa: E402
 from rubric.report import PASS, FAIL, WARN, ERROR, classify  # noqa: E402
+from rubric.capabilities import evaluate_tool_call, evaluate_structured_output  # noqa: E402
+
+
+class _Cap:
+    """Duck-typed stand-in for client.CapabilityResult."""
+
+    def __init__(self, text=None, tool_calls=None, error=None, unsupported=False):
+        self.text = text
+        self.tool_calls = tool_calls
+        self.error = error
+        self.unsupported = unsupported
+
+    @property
+    def is_error(self):
+        return self.error is not None
+
+
+def _tc(name="get_weather", arguments='{"location": "Paris, France"}'):
+    return [{"name": name, "arguments": arguments}]
 
 
 class _R:
@@ -102,6 +121,56 @@ def test_classify_garbled_fails():
 
 def test_classify_error():
     assert _classify(_R(error="AuthenticationError: 401"))[0] == ERROR
+
+
+def test_tool_call_correct_passes():
+    assert evaluate_tool_call(_Cap(tool_calls=_tc()))[0] == PASS
+
+
+def test_tool_call_missing_fails():
+    assert evaluate_tool_call(_Cap(tool_calls=[]))[0] == FAIL
+
+
+def test_tool_call_wrong_name_fails():
+    assert evaluate_tool_call(_Cap(tool_calls=_tc(name="lookup")))[0] == FAIL
+
+
+def test_tool_call_bad_json_args_fails():
+    assert evaluate_tool_call(_Cap(tool_calls=_tc(arguments="{not json")))[0] == FAIL
+
+
+def test_tool_call_missing_location_fails():
+    assert evaluate_tool_call(_Cap(tool_calls=_tc(arguments='{"unit": "celsius"}')))[0] == FAIL
+
+
+def test_tool_call_unsupported_warns():
+    assert evaluate_tool_call(_Cap(error="400 tools not supported", unsupported=True))[0] == WARN
+
+
+def test_tool_call_other_error():
+    assert evaluate_tool_call(_Cap(error="AuthenticationError: 401"))[0] == ERROR
+
+
+def test_structured_valid_passes():
+    ok = _Cap(text='{"name": "Ada Lovelace", "age": 36, "city": "London"}')
+    assert evaluate_structured_output(ok)[0] == PASS
+
+
+def test_structured_bad_json_fails():
+    assert evaluate_structured_output(_Cap(text="not json at all"))[0] == FAIL
+
+
+def test_structured_missing_key_fails():
+    assert evaluate_structured_output(_Cap(text='{"name": "Ada", "city": "London"}'))[0] == FAIL
+
+
+def test_structured_wrong_type_fails():
+    assert evaluate_structured_output(_Cap(text='{"name": "Ada", "age": "36", "city": "London"}'))[0] == FAIL
+
+
+def test_structured_unsupported_warns():
+    cap = _Cap(error="400 response_format json_schema not supported", unsupported=True)
+    assert evaluate_structured_output(cap)[0] == WARN
 
 
 def _run_all():
